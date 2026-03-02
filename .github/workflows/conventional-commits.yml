@@ -1,0 +1,135 @@
+name: Conventional Commits Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  check-conventional-commits:
+    name: Validate Commit Messages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate commit messages
+        id: check
+        run: |
+          # Conventional Commits pattern
+          # Format: <type>[optional scope]: <description>
+          # Types: feat, fix, docs, style, refactor, test, chore, perf, ci, build, revert
+          PATTERN='^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\(.+\))?(!)?: .+'
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          echo "Checking commits from $BASE_SHA to $HEAD_SHA"
+
+          INVALID=""
+          while IFS= read -r line; do
+            if [ -z "$line" ]; then continue; fi
+            HASH=$(echo "$line" | awk '{print $1}')
+            MSG=$(echo "$line" | cut -d' ' -f2-)
+            if ! echo "$MSG" | grep -qE "$PATTERN"; then
+              INVALID="${INVALID}  - \`${HASH:0:7}\`: ${MSG}"$'\n'
+            fi
+          done < <(git log --format="%H %s" "${BASE_SHA}..${HEAD_SHA}")
+
+          if [ -n "$INVALID" ]; then
+            echo "invalid=true" >> $GITHUB_OUTPUT
+            {
+              echo 'commits<<EOF'
+              echo "$INVALID"
+              echo 'EOF'
+            } >> $GITHUB_OUTPUT
+            echo "::error::Found commits that do not follow Conventional Commits specification."
+          else
+            echo "invalid=false" >> $GITHUB_OUTPUT
+            echo "All commits follow the Conventional Commits specification."
+          fi
+
+      - name: Close PR with explanation comment
+        if: steps.check.outputs.invalid == 'true'
+        uses: peter-evans/close-pull-request@v3
+        with:
+          comment: |
+            ## ❌ PR Closed: Conventional Commits Violation
+
+            This PR has been automatically closed because the following commits do not follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
+
+            ${{ steps.check.outputs.commits }}
+
+            ### Required Format
+
+            ```
+            <type>[optional scope]: <description>
+            ```
+
+            **Valid types:** `feat` | `fix` | `docs` | `style` | `refactor` | `test` | `chore` | `perf` | `ci` | `build` | `revert`
+
+            **Examples:**
+            - `feat: add user authentication endpoint`
+            - `fix(auth): resolve JWT token expiry issue`
+            - `docs: update API documentation`
+            - `chore: update dependencies`
+
+            Please fix your commit messages using `git rebase -i` and open a new PR.
+
+      - name: Send email notification on violation
+        if: steps.check.outputs.invalid == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.ethereal.email
+          server_port: 587
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "[CI] PR #${{ github.event.number }} Closed - Conventional Commits Violation"
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: ${{ secrets.MAIL_FROM }}
+          content_type: text/html
+          body: |
+            <html>
+            <body>
+              <h2 style="color: #d32f2f;">&#10060; PR #${{ github.event.number }} Closed — Conventional Commits Violation</h2>
+
+              <p>
+                The pull request <strong>"${{ github.event.pull_request.title }}"</strong>
+                by <strong>@${{ github.event.pull_request.user.login }}</strong>
+                has been automatically closed.
+              </p>
+
+              <h3>Non-conforming commits:</h3>
+              <pre style="background:#f5f5f5; padding:12px; border-left:4px solid #d32f2f;">
+            ${{ steps.check.outputs.commits }}
+              </pre>
+
+              <h3>Required Format:</h3>
+              <pre style="background:#f5f5f5; padding:12px;">
+            &lt;type&gt;[optional scope]: &lt;description&gt;
+              </pre>
+
+              <p><strong>Valid types:</strong> feat, fix, docs, style, refactor, test, chore, perf, ci, build, revert</p>
+
+              <p>
+                <a href="${{ github.event.pull_request.html_url }}" style="color: #1976d2;">
+                  View Closed PR #${{ github.event.number }}
+                </a>
+              </p>
+
+              <hr/>
+              <small>Repository: ${{ github.repository }}</small>
+            </body>
+            </html>
+
+      - name: Fail the workflow
+        if: steps.check.outputs.invalid == 'true'
+        run: |
+          echo "::error::Conventional commits check failed. PR has been closed and a notification email was sent."
+          exit 1

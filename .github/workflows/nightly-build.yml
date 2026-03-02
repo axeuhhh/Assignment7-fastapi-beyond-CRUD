@@ -1,0 +1,158 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Every day at 12:00 AM UTC
+  workflow_dispatch:      # Allow manual trigger for testing
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Job 1: Run all tests
+  # ─────────────────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    env:
+      # Dummy env vars so pydantic_settings can load the config module during tests.
+      # Tests use Mocks and do not connect to real services.
+      DATABASE_URL: postgresql+asyncpg://testuser:testpass@localhost:5432/testdb
+      JWT_SECRET: nightly-ci-test-secret-key-do-not-use-in-prod
+      JWT_ALGORITHM: HS256
+      REDIS_URL: redis://localhost:6379/0
+      MAIL_USERNAME: ci-test@ethereal.email
+      MAIL_PASSWORD: ci-test-password
+      MAIL_FROM: ci-test@ethereal.email
+      MAIL_PORT: 587
+      MAIL_SERVER: smtp.ethereal.email
+      MAIL_FROM_NAME: NightlyBuildCI
+      DOMAIN: localhost
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        run: python -m pytest src/tests/ -v
+
+  # ─────────────────────────────────────────────
+  # Job 2: Build and push Docker image (only if tests pass)
+  # ─────────────────────────────────────────────
+  build-and-push:
+    name: Build and Push Docker Image
+    needs: test
+    runs-on: ubuntu-latest
+    if: success()
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=nightly
+            type=raw,value=nightly-{{date 'YYYYMMDD'}}
+            type=sha,prefix=nightly-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # ─────────────────────────────────────────────
+  # Job 3: Send failure notification if test or build failed
+  # ─────────────────────────────────────────────
+  notify-failure:
+    name: Send Failure Notification
+    needs: [test, build-and-push]
+    runs-on: ubuntu-latest
+    if: failure()
+
+    steps:
+      - name: Send failure email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.ethereal.email
+          server_port: 587
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "[CI] Nightly Build FAILED — ${{ github.repository }}"
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: ${{ secrets.MAIL_FROM }}
+          content_type: text/html
+          body: |
+            <html>
+            <body>
+              <h2 style="color: #d32f2f;">&#128308; Nightly Build Failed</h2>
+
+              <p>
+                The nightly build for <strong>${{ github.repository }}</strong> has failed.
+                The Docker image was <strong>NOT</strong> pushed to the container registry.
+              </p>
+
+              <table style="border-collapse: collapse; width: 100%;">
+                <tr>
+                  <td style="padding: 8px; border: 1px solid #ddd;"><strong>Repository</strong></td>
+                  <td style="padding: 8px; border: 1px solid #ddd;">${{ github.repository }}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 8px; border: 1px solid #ddd;"><strong>Branch</strong></td>
+                  <td style="padding: 8px; border: 1px solid #ddd;">${{ github.ref_name }}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 8px; border: 1px solid #ddd;"><strong>Run ID</strong></td>
+                  <td style="padding: 8px; border: 1px solid #ddd;">${{ github.run_id }}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 8px; border: 1px solid #ddd;"><strong>Triggered at</strong></td>
+                  <td style="padding: 8px; border: 1px solid #ddd;">${{ github.run_started_at }}</td>
+                </tr>
+              </table>
+
+              <br/>
+              <p>
+                <a
+                  href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  style="background:#d32f2f; color:white; padding:10px 20px; text-decoration:none; border-radius:4px;"
+                >
+                  View Build Logs
+                </a>
+              </p>
+
+              <hr/>
+              <small>This is an automated notification from GitHub Actions.</small>
+            </body>
+            </html>
