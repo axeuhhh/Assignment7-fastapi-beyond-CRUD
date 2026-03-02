@@ -24,23 +24,27 @@ jobs:
         run: |
           # Conventional Commits pattern
           # Format: <type>[optional scope]: <description>
-          # Types: feat, fix, docs, style, refactor, test, chore, perf, ci, build, revert
           PATTERN='^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)(\(.+\))?(!)?: .+'
 
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-
-          echo "Checking commits from $BASE_SHA to $HEAD_SHA"
+          # Use branch name range — more reliable than raw SHAs
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          echo "Base branch: $BASE_BRANCH"
+          echo "All commits in range origin/${BASE_BRANCH}..HEAD:"
+          git log --format="%H %s" "origin/${BASE_BRANCH}..HEAD"
 
           INVALID=""
           while IFS= read -r line; do
             if [ -z "$line" ]; then continue; fi
             HASH=$(echo "$line" | awk '{print $1}')
             MSG=$(echo "$line" | cut -d' ' -f2-)
+            echo "  Checking: [$MSG]"
             if ! echo "$MSG" | grep -qE "$PATTERN"; then
+              echo "  -> INVALID"
               INVALID="${INVALID}  - \`${HASH:0:7}\`: ${MSG}"$'\n'
+            else
+              echo "  -> OK"
             fi
-          done < <(git log --format="%H %s" "${BASE_SHA}..${HEAD_SHA}")
+          done < <(git log --format="%H %s" "origin/${BASE_BRANCH}..HEAD")
 
           if [ -n "$INVALID" ]; then
             echo "invalid=true" >> $GITHUB_OUTPUT
@@ -55,32 +59,35 @@ jobs:
             echo "All commits follow the Conventional Commits specification."
           fi
 
-      - name: Close PR with explanation comment
+      - name: Close PR and post comment
         if: steps.check.outputs.invalid == 'true'
-        uses: peter-evans/close-pull-request@v3
-        with:
-          comment: |
-            ## ❌ PR Closed: Conventional Commits Violation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.number }} \
+            --repo "${{ github.repository }}" \
+            --body "## ❌ PR Closed: Conventional Commits Violation
 
-            This PR has been automatically closed because the following commits do not follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
+          This PR has been automatically closed because the following commits do not follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
 
-            ${{ steps.check.outputs.commits }}
+          ${{ steps.check.outputs.commits }}
 
-            ### Required Format
+          ### Required Format
+          \`\`\`
+          <type>[optional scope]: <description>
+          \`\`\`
 
-            ```
-            <type>[optional scope]: <description>
-            ```
+          **Valid types:** \`feat\` | \`fix\` | \`docs\` | \`style\` | \`refactor\` | \`test\` | \`chore\` | \`perf\` | \`ci\` | \`build\` | \`revert\`
 
-            **Valid types:** `feat` | `fix` | `docs` | `style` | `refactor` | `test` | `chore` | `perf` | `ci` | `build` | `revert`
+          **Examples:**
+          - \`feat: add user authentication endpoint\`
+          - \`fix(auth): resolve JWT token expiry issue\`
+          - \`docs: update API documentation\`
 
-            **Examples:**
-            - `feat: add user authentication endpoint`
-            - `fix(auth): resolve JWT token expiry issue`
-            - `docs: update API documentation`
-            - `chore: update dependencies`
+          Please fix your commit messages and open a new PR."
 
-            Please fix your commit messages using `git rebase -i` and open a new PR.
+          gh pr close ${{ github.event.number }} \
+            --repo "${{ github.repository }}"
 
       - name: Send email notification on violation
         if: steps.check.outputs.invalid == 'true'
