@@ -10,7 +10,7 @@ logger.disabled = True
 
 
 def register_middleware(app: FastAPI):
-    # this is just for testing purposes, in production you should use a proper logging system like loguru or structlog
+    # small change to test github actions
     @app.middleware("http")
     async def custom_logging(request: Request, call_next):
         start_time = time.time()
